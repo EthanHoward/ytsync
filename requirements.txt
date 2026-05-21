@@ -1,0 +1,6 @@
+google-api-python-client
+google-auth-oauthlib
+openai-whisper
+tiktoken
+fs
+numpy<2

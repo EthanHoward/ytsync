@@ -1,0 +1,1 @@
+Start-Process Scripts\python.exe -ArgumentList "main.py" -RedirectStandardOutput "NUL" -WindowStyle Hidden

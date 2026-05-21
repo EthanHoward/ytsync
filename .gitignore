@@ -1,0 +1,9 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+conf.ini
+Lib/
+Scripts/
+Include/
+models/
+share/
+data/
+client_secret_488463353910-vgo9063741g9hqu4dlckbt95jigdq7sb.apps.googleusercontent.com.json
