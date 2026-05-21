@@ -1,4 +1,5 @@
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.http import MediaFileUpload
 from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.errors import HttpError
@@ -17,6 +18,7 @@ import torch
 import queue
 import re
 import os
+import hashlib
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
@@ -70,6 +72,8 @@ class MetadataFile:
         self.youtube_link = ""
         self.resumable_uri = ""
         self.resumable_upload_progress = 0
+        self.youtube_video_id = ""
+        self.local_id = ""
         
         self.model = model
         
@@ -82,6 +86,8 @@ class MetadataFile:
             try:
                 self.youtube_uploaded = load.youtube_uploaded
                 self.youtube_link = load.youtube_link
+                self.youtube_video_id = getattr(load, "youtube_video_id", "")
+                self.local_id = getattr(load, "local_id", "")
                 
                 if load.youtube_link:
                     self.resumable_uri = "UPLOADED"
@@ -100,6 +106,7 @@ class MetadataFile:
         if FORCE_RESET_YOUTUBE:
             self.youtube_uploaded = False
             self.youtube_link = ""
+            self.youtube_video_id = ""
     
         
     def transcribe_to_text(self):
@@ -200,6 +207,8 @@ class MetadataFile:
             self_stored.blacklist_status = self.blacklist_status
             self_stored.youtube_uploaded = self.youtube_uploaded
             self_stored.youtube_link = self.youtube_link
+            self_stored.youtube_video_id = self.youtube_video_id
+            self_stored.local_id = self.local_id
             
             self_stored.resumable_uri = self.resumable_uri
             self_stored.resumable_upload_progress = self.resumable_upload_progress
@@ -247,12 +256,13 @@ class MetadataFile:
                     request_body = {
                         "snippet": {
                             "title": title or self.vid_filepath.stem,
-                            "description": description or "Auto-Uploaded by EthanHoward/ytsync (Private Code)",
+                            "description": description or build_upload_description(self),
                             "tags": tags or [],
                             "categoryId": category_id
                         },
                         "status": {
-                            "privacyStatus": privacy_status
+                            "privacyStatus": privacy_status,
+                            "selfDeclaredMadeForKids": False
                         }
                     }
                     
@@ -314,6 +324,7 @@ class MetadataFile:
                             sleep(wait)
 
                     self.youtube_uploaded = True
+                    self.youtube_video_id = response["id"]
                     self.youtube_link = f"https://youtu.be/{response['id']}"
                     log(f"[+] Upload complete! Video ID: {response['id']} at {self.youtube_link}")
                     
@@ -406,23 +417,60 @@ def fp_open(filepath: Path, mode: str) -> any:
 
 socket.setdefaulttimeout(300)
 
-if os.path.exists(CREDENTIALS_FILE):
-    with fp_open(CREDENTIALS_FILE, "rb") as cred_file:
-        credentials = pickle.load(cred_file)
-        log("[*] Loaded existing credentials from file.")
-else:
-    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
-    credentials = flow.run_local_server(
-        port=0,
-        access_type="offline",
-        prompt="consent"
+def compute_local_id(path: Path, read_bytes: int = 8 * 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    stat = path.stat()
+    h.update(f"{stat.st_size}:{path.suffix.lower()}".encode("utf-8"))
+    with open(path, "rb") as f:
+        h.update(f.read(read_bytes))
+    return h.hexdigest()[:20]
+
+
+def build_upload_description(metadata_file: "MetadataFile") -> str:
+    relative_path = metadata_file.vid_filepath.relative_to(TARGET_DIRECTORY)
+    if not metadata_file.local_id:
+        metadata_file.local_id = compute_local_id(metadata_file.vid_filepath)
+        metadata_file.to_serialized()
+    return (
+        "Auto-Uploaded by EthanHoward/ytsync (Private Code)\n\n"
+        "[YTSYNC_META]\n"
+        f"local_id={metadata_file.local_id}\n"
+        f"relative_path={relative_path.as_posix()}"
+    )
+
+
+def load_credentials():
+    credentials = None
+    if os.path.exists(CREDENTIALS_FILE):
+        with fp_open(CREDENTIALS_FILE, "rb") as cred_file:
+            credentials = pickle.load(cred_file)
+            log("[*] Loaded existing credentials from file.")
+
+    if credentials and getattr(credentials, "expired", False) and getattr(credentials, "refresh_token", None):
+        try:
+            credentials.refresh(Request())
+            log("[*] Refreshed expired credentials using refresh token.")
+        except Exception as e:
+            log(f"[!] Token refresh failed: {e}. Starting OAuth login flow.")
+            credentials = None
+
+    if credentials is None or not getattr(credentials, "valid", False):
+        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
+        credentials = flow.run_local_server(
+            port=0,
+            access_type="offline",
+            prompt="consent"
         )
+        log("[*] OAuth flow complete, received new credentials.")
 
     with fp_open(CREDENTIALS_FILE, "wb") as cred_file:
         pickle.dump(credentials, cred_file)
-        log("[*] Saved new credentials to file.")
+        log("[*] Saved credentials to file.")
 
-youtube = build("youtube", "v3", credentials=credentials)
+    return credentials
+
+
+youtube = build("youtube", "v3", credentials=load_credentials())
     
 
 def walk_directory(directory: Path):
