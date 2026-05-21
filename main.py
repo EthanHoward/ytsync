@@ -417,34 +417,44 @@ def fp_open(filepath: Path, mode: str) -> any:
 
 socket.setdefaulttimeout(300)
 
-def compute_local_id(path: Path, read_bytes: int = 8 * 1024 * 1024) -> str:
+def compute_local_id(path: Path) -> str:
     h = hashlib.sha256()
     stat = path.stat()
     h.update(f"{stat.st_size}:{path.suffix.lower()}".encode("utf-8"))
     with open(path, "rb") as f:
-        h.update(f.read(read_bytes))
+        while True:
+            chunk = f.read(64 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
     return h.hexdigest()[:20]
 
 
-def build_upload_description(metadata_file: "MetadataFile") -> str:
-    relative_path = metadata_file.vid_filepath.relative_to(TARGET_DIRECTORY)
+def build_upload_description(metadata_file: "MetadataFile", include_relative: bool = False) -> str:
     if not metadata_file.local_id:
         metadata_file.local_id = compute_local_id(metadata_file.vid_filepath)
         metadata_file.to_serialized()
-    return (
+    description = (
         "Auto-Uploaded by EthanHoward/ytsync (Private Code)\n\n"
         "[YTSYNC_META]\n"
-        f"local_id={metadata_file.local_id}\n"
-        f"relative_path={relative_path.as_posix()}"
+        f"local_id={metadata_file.local_id}"
     )
+    if include_relative:
+        relative_path = metadata_file.vid_filepath.relative_to(TARGET_DIRECTORY)
+        description += f"\nrelative_path={relative_path.as_posix()}"
+    return description
 
 
 def load_credentials():
     credentials = None
     if os.path.exists(CREDENTIALS_FILE):
-        with fp_open(CREDENTIALS_FILE, "rb") as cred_file:
-            credentials = pickle.load(cred_file)
-            log("[*] Loaded existing credentials from file.")
+        try:
+            with fp_open(CREDENTIALS_FILE, "rb") as cred_file:
+                credentials = pickle.load(cred_file)
+                log("[*] Loaded existing credentials from file.")
+        except (pickle.UnpicklingError, EOFError, OSError) as e:
+            log(f"[!] Could not load cached credentials from {CREDENTIALS_FILE}: {e}. Treating as cache miss.")
+            credentials = None
 
     if credentials and getattr(credentials, "expired", False) and getattr(credentials, "refresh_token", None):
         try:
